@@ -125,6 +125,10 @@ impl Build {
             config.flag_if_supported("-fno-math-errno");
         }
 
+        // ree: never fuse a*b+c into one rounding (clang does on aarch64 by default, MSVC on x86-64
+        // does not), so float results are the same bits on Apple Silicon as on Windows.
+        config.flag_if_supported("-ffp-contract=off");
+
         config.include(&common_include_dir);
 
         // Build `Ast` library

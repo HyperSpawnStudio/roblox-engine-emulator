@@ -176,7 +176,37 @@ fn alive(pid: u32) -> bool {
     running && image.is_some_and(|image| Path::new(&image).file_name().is_some_and(|file| file.to_string_lossy().to_ascii_lowercase().starts_with("ree")))
 }
 
-#[cfg(not(windows))]
+/// The same answer on macOS: the process exists (`kill(pid, 0)`, EPERM counting as existing) and its executable
+/// (`proc_pidpath`, which fails for an exited, unreaped process) is a ree binary.
+#[cfg(target_os = "macos")]
+fn alive(pid: u32) -> bool {
+    unsafe extern "C" {
+        fn kill(pid: i32, signal: i32) -> i32;
+        fn proc_pidpath(pid: i32, buffer: *mut std::ffi::c_void, size: u32) -> i32;
+    }
+    const EPERM: i32 = 1;
+    let Ok(pid) = i32::try_from(pid) else { return false };
+    if unsafe { kill(pid, 0) } != 0 && std::io::Error::last_os_error().raw_os_error() != Some(EPERM) {
+        return false;
+    }
+    // PROC_PIDPATHINFO_MAXSIZE
+    let mut name = [0u8; 4096];
+    let length = unsafe { proc_pidpath(pid, name.as_mut_ptr().cast(), name.len() as u32) };
+    length > 0 && is_ree(Path::new(&*String::from_utf8_lossy(&name[..length as usize])))
+}
+
+/// On Linux: `/proc/<pid>/exe` names a ree binary (a process that has exited has none).
+#[cfg(target_os = "linux")]
+fn alive(pid: u32) -> bool {
+    std::fs::read_link(format!("/proc/{pid}/exe")).is_ok_and(|image| is_ree(&image))
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn is_ree(image: &Path) -> bool {
+    image.file_name().is_some_and(|file| file.to_string_lossy().to_ascii_lowercase().starts_with("ree"))
+}
+
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 fn alive(_pid: u32) -> bool {
     true
 }
@@ -370,7 +400,7 @@ mod tests {
     #[test]
     fn a_dead_or_foreign_pid_is_no_service() {
         assert!(!alive(std::process::id()), "this test binary is not a ree binary");
-        let mut child = std::process::Command::new("cmd").args(["/C", "exit 0"]).spawn().unwrap();
+        let mut child = if cfg!(windows) { std::process::Command::new("cmd").args(["/C", "exit 0"]).spawn() } else { std::process::Command::new("true").spawn() }.unwrap();
         let pid = child.id();
         child.wait().unwrap();
         assert!(!alive(pid), "an exited process");

@@ -461,9 +461,12 @@ A print of exactly `@done` ends `ree run` / `ree record` at the end of that fram
 - Physics beyond free fall (collisions, constraints, body movers), particles and the default character
   scripts are not simulated.
 - Script HTTP requests are disabled: no script reaches the network.
-- The engine is developed and tested on Windows. Other systems build and run, but some fallbacks are
-  weak: off Windows a `ree serve` record of a dead process is not detected (`alive()` always answers
-  true), and memory is read from `/proc/meminfo` (Linux only).
+- The engine is developed and tested on Windows; macOS on Apple Silicon passes the same tests. Floats are
+  the same bits there: the Luau VM is compiled with `-ffp-contract=off` (patches/luau.patch), as clang
+  would otherwise fuse multiply-adds on arm64. The one exception is what calls the system's `sinf`
+  (CFrame `Lerp`), which can be one f32 step off the Windows result. A `ree serve` record of a dead
+  process is detected on Windows, macOS and Linux (`alive()` in src/serve/client.rs). Memory is read
+  from `/proc/meminfo` (Linux only).
 
 ## Data files
 

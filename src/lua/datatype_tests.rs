@@ -424,9 +424,34 @@ fn cframe_operations_keep_their_values_bit_for_bit() {
     let lines = assert_script(include_str!("cframe_golden/ops.luau"));
     let expected: Vec<String> = include_str!("cframe_golden/ops.txt").lines().map(|line| format!("print: {line}")).collect();
     for (index, (got, want)) in lines.iter().zip(&expected).enumerate() {
-        assert_eq!(got, want, "line {}", index + 1);
+        let lerp = want.split(' ').nth(1).is_some_and(|label| label.ends_with("lerp"));
+        if cfg!(windows) || !lerp || got == want {
+            assert_eq!(got, want, "line {}", index + 1);
+        } else {
+            assert_within_f32_steps(got, want, LERP_STEPS, index + 1);
+        }
     }
     assert_eq!(lines.len(), expected.len());
+}
+
+/// The golden was printed on Windows. Lerp's slerp takes `sinf` from the system's C library (glam's std math),
+/// and macOS's differs from the Windows CRT's for some arguments; the rotation built from it then differs by a
+/// few f32 steps (measured 2026-11-06, Apple M5 Max: `lerp` 1 step, `aliaslerp` 2). Off Windows a lerp line may
+/// differ by this much per number, never in its words or in how many numbers it has; every other line is exact.
+const LERP_STEPS: i64 = 4;
+
+fn assert_within_f32_steps(got: &str, want: &str, most: i64, line: usize) {
+    let (got, want): (Vec<&str>, Vec<&str>) = (got.split(' ').collect(), want.split(' ').collect());
+    assert_eq!(got.len(), want.len(), "line {line}: {got:?} against {want:?}");
+    for (a, b) in got.iter().zip(&want) {
+        match (a.parse::<f64>(), b.parse::<f64>()) {
+            (Ok(a), Ok(b)) => {
+                let steps = ((a as f32).to_bits() as i64 - (b as f32).to_bits() as i64).abs();
+                assert!(a == b || (a.signum() == b.signum() && steps <= most), "line {line}: {a} against {b} ({steps} f32 steps)");
+            }
+            _ => assert_eq!(a, b, "line {line}"),
+        }
+    }
 }
 
 /// The work-clock profile (`RUR_LUAU_PROFILE_CLOCK=work`) weighs stacks by what the work clock charged, not by
