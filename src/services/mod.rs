@@ -254,6 +254,18 @@ fn constant(value: impl Fn(&Lua) -> LuaResult<LuaValue> + 'static) -> MethodFn {
     Rc::new(move |lua, _, _, _| Ok(values([value(lua)?])))
 }
 
+/// A ReflectionService ReflectedClass: `{Name = "Frame", Superclass = "GuiObject"}` (no Superclass at
+/// the root).
+fn reflected_class(lua: &Lua, reflection: &Reflection, id: ClassId) -> LuaResult<LuaTable> {
+    let info = reflection.class(id);
+    let table = lua.create_table()?;
+    table.raw_set("Name", &*info.name)?;
+    if let Some(superclass) = info.superclass {
+        table.raw_set("Superclass", &*reflection.class(superclass).name)?;
+    }
+    Ok(table)
+}
+
 fn string_value(lua: &Lua, text: &str) -> LuaResult<LuaValue> {
     Ok(LuaValue::String(lua.create_string(text)?))
 }
@@ -378,6 +390,30 @@ pub fn install(engine: &Rc<Engine>) {
         behaviors.add_getter(data_model, K::PlaceVersion as NameId, getter(|_, _, _| Ok(LuaValue::Number(0.0))));
         behaviors.add_getter(data_model, K::PrivateServerId as NameId, getter(|lua, _, _| Ok(string_value(lua, "")?)));
         behaviors.add_getter(data_model, K::PrivateServerOwnerId as NameId, getter(|_, _, _| Ok(LuaValue::Number(0.0))));
+    }
+
+    // ReflectionService: GetClasses / GetClass give each class's Name and Superclass (what libraries
+    // read: React's host component tags map lowercased names to classes through GetClasses); the
+    // rest of a ReflectedClass (Permits, Display, members) is not recorded
+    if let Some(reflection_service) = class(&reflection, "ReflectionService") {
+        if let Some(get_classes) = name(&reflection, "GetClasses") {
+            behaviors.add_method(reflection_service, get_classes, method(|lua, engine, _, _| {
+                let list = lua.create_table()?;
+                for id in 0..engine.reflection.class_count() as ClassId {
+                    list.raw_push(reflected_class(lua, &engine.reflection, id)?)?;
+                }
+                Ok(values([LuaValue::Table(list)]))
+            }));
+        }
+        if let Some(get_class) = name(&reflection, "GetClass") {
+            behaviors.add_method(reflection_service, get_class, method(|lua, engine, _, args| {
+                let class_name = args.string(1).map(|s| s.to_string_lossy()).unwrap_or_default();
+                Ok(values([match engine.reflection.class_id(&class_name) {
+                    Some(id) => LuaValue::Table(reflected_class(lua, &engine.reflection, id)?),
+                    None => LuaValue::Nil,
+                }]))
+            }));
+        }
     }
 
     // UserSettings(): GetService / FindService give its settings services (children made on first

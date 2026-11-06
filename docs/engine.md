@@ -163,6 +163,12 @@ older capitalized keys), property values explicit (`{"Vector3": [1, 2, 3]}`) or 
 the property's type in rbx-dom's database), round-tripped through rbx_binary as `rojo build` writes
 them. A file Rojo would reject is reported as a warning and not mounted.
 
+A directory holding a `default.project.json` mounts as that project, as Rojo reads it (every roblox-ts
+package is one: `{"name": "React", "tree": {"$path": "src"}}`): inside a mounted directory it is named
+by the project's `name`, and mounted directly (`--mount`, a project node's `$path`) by the mount. Its
+tree's `$path` (a directory, a file, another project's directory; `{"optional": path}` skipped when
+missing), `$className` and child nodes are mounted; `$properties` and `$attributes` are not applied.
+
 ## Asset bundles (`src/project/model_assets.rs`, feature `bundles`)
 
 A project can name model assets in an asset manifest: the project folder's `asset-manifest.luau`, a
@@ -461,6 +467,8 @@ A print of exactly `@done` ends `ree run` / `ree record` at the end of that fram
 - Physics beyond free fall (collisions, constraints, body movers), particles and the default character
   scripts are not simulated.
 - Script HTTP requests are disabled: no script reaches the network.
+- ReflectionService's `GetClasses` and `GetClass` give each class's `Name` and `Superclass` only (the
+  rest of a ReflectedClass, Permits, Display and members, is not recorded).
 - The engine is developed and tested on Windows; macOS on Apple Silicon passes the same tests. Floats are
   the same bits there: the Luau VM is compiled with `-ffp-contract=off` (patches/luau.patch), as clang
   would otherwise fuse multiply-adds on arm64. The one exception is what calls the system's `sinf`

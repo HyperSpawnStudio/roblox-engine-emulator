@@ -726,7 +726,16 @@ fn mount_directory(engine: &Engine, node: &ScanNode, instance: InstanceId, mount
         }
         if let Some(child_node) = node.dirs.get(entry) {
             let child_relative = if relative.is_empty() { entry.clone() } else { format!("{relative}/{entry}") };
-            mount_directory_as(engine, child_node, instance, entry, mount, &child_relative);
+            match nested_project(child_node) {
+                // named by the project, as Rojo names a directory it reads as a project
+                Some(project) => {
+                    let name = project.get("name").and_then(|name| name.as_str()).unwrap_or(entry).to_string();
+                    mount_project_node(engine, child_node, &project["tree"], instance, &name, mount, &child_relative, 0);
+                }
+                None => {
+                    mount_directory_as(engine, child_node, instance, entry, mount, &child_relative);
+                }
+            }
         } else {
             let lower = entry.to_ascii_lowercase();
             if lower.starts_with("init.") || lower.ends_with(".meta.json") {
@@ -783,6 +792,76 @@ fn mount_directory_as(engine: &Engine, node: &ScanNode, parent: InstanceId, name
     };
     mount_directory(engine, node, child, mount, relative);
     child
+}
+
+/// The project of a directory that holds a `default.project.json` (with a `tree`): Rojo reads such a
+/// directory as that project, not as a folder (every roblox-ts package is one: `{"name": "React",
+/// "tree": {"$path": "src"}}`).
+fn nested_project(node: &ScanNode) -> Option<serde_json::Value> {
+    if !node.entries.iter().any(|entry| entry == "default.project.json") {
+        return None;
+    }
+    read_json(&format!("{}/default.project.json", node.path)).filter(|project| project.get("tree").is_some_and(|tree| tree.is_object()))
+}
+
+/// The scanned directory `relative_to` below `node` (`a/b`), when the scan has it.
+fn scanned_below<'a>(node: &'a ScanNode, relative_to: &str) -> Option<&'a ScanNode> {
+    relative_to.split('/').filter(|part| !part.is_empty() && *part != ".").try_fold(node, |node, part| node.dirs.get(part))
+}
+
+/// One node of a Rojo project tree (`tree`, in the project at directory `project`) mounted as the
+/// child `name` of `parent`: its `$path` (a directory, another project's directory, a file; `{
+/// "optional": path }` skipped when missing), else an instance of its `$className` (a Folder
+/// without one), then its child nodes. `$properties` and `$attributes` are not applied, as
+/// cli/rojo.mjs in roblox-ui-renderer does not apply them to the nodes it mounts.
+#[allow(clippy::too_many_arguments)]
+fn mount_project_node(engine: &Engine, project: &ScanNode, tree: &serde_json::Value, parent: InstanceId, name: &str, mount: &mut MountCounts, relative: &str, depth: u32) -> Option<InstanceId> {
+    if depth > 32 {
+        return None;
+    }
+    let reflection = &engine.reflection;
+    let source = match tree.get("$path") {
+        Some(serde_json::Value::String(path)) => Some(path.as_str()),
+        Some(serde_json::Value::Object(optional)) => optional.get("optional").and_then(|path| path.as_str()),
+        _ => None,
+    };
+    let instance = match source {
+        Some(source) => {
+            let source = normalize(source);
+            let path = if Path::new(&source).is_absolute() { source.clone() } else { format!("{}/{}", project.path, source.trim_start_matches("./")) };
+            crate::files::note(Path::new(&path));
+            let metadata = std::fs::metadata(&path).ok()?;
+            if metadata.is_dir() {
+                let scanned = if Path::new(&source).is_absolute() { None } else { scanned_below(project, &source) };
+                let fresh = if scanned.is_none() { Some(listed(path.trim_end_matches('/').to_string())) } else { None };
+                let node = scanned.or(fresh.as_ref())?;
+                let instance = match nested_project(node) {
+                    Some(nested) if !std::ptr::eq(node, project) => mount_project_node(engine, node, &nested["tree"], parent, name, mount, relative, depth + 1)?,
+                    _ => mount_directory_as(engine, node, parent, name, mount, relative),
+                };
+                if let Some(fresh) = fresh {
+                    keep_listing(engine, fresh);
+                }
+                instance
+            } else {
+                let file_name = Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                mount_file(engine, &path, &file_name, Some(name), parent, mount);
+                find_child(&engine.state.borrow(), parent, name)?
+            }
+        }
+        None => {
+            let class_name = tree.get("$className").and_then(|class| class.as_str()).filter(|class| reflection.class_id(class).is_some_and(|c| !reflection.class(c).service)).unwrap_or("Folder");
+            let mut state = engine.state.borrow_mut();
+            ensure_child(&mut state, reflection, parent, name, class_name, mount)
+        }
+    };
+    for (child_name, child) in tree.as_object().into_iter().flatten() {
+        if child_name.starts_with('$') || !child.is_object() {
+            continue;
+        }
+        mount_project_node(engine, project, child, instance, child_name, mount, &format!("{relative}/{child_name}"), depth + 1);
+    }
+    Some(instance)
 }
 
 /// A file entry of a mounted directory (`file_name` its name on disk; `name` overrides the
@@ -945,11 +1024,15 @@ pub fn mount_at(engine: &Engine, spec: &Mount) -> Result<MountCounts, String> {
             let metadata = std::fs::metadata(&path).map_err(|e| format!("{}={path}: {e}", spec.segments.join("/")))?;
             if metadata.is_dir() {
                 let node = listed(path);
-                match last {
-                    Some(last) => {
+                match (last, nested_project(&node)) {
+                    // a project node's $path to a project's directory: that project, named by the node
+                    (Some(last), Some(project)) => {
+                        mount_project_node(engine, &node, &project["tree"], parent, last, &mut mount, &relative, 0);
+                    }
+                    (Some(last), None) => {
                         mount_directory_as(engine, &node, parent, last, &mut mount, &relative);
                     }
-                    None => mount_directory(engine, &node, service, &mut mount, service_name),
+                    (None, _) => mount_directory(engine, &node, service, &mut mount, service_name),
                 }
                 keep_listing(engine, node);
             } else {

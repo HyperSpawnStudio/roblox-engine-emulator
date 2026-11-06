@@ -780,6 +780,75 @@ fn rojo_json_models_mount_as_their_instances() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Directories holding a `default.project.json` mount as that project, as Rojo reads them (every
+/// roblox-ts package: `node_modules/@rbxts-js/react` is `{"name": "React", "tree": {"$path": "src"}}`,
+/// and `@rbxts/react` requires it as `@rbxts-js.React`): named by the project inside a mounted
+/// directory and by the mount itself when mounted directly, its tree's `$path`, `$className` and
+/// child nodes, an optional `$path` skipped when missing, no Folder left under the directory's name.
+#[test]
+fn directories_with_a_project_file_mount_as_that_project() {
+    use super::project::{Mount, mount_at};
+    let dir = std::env::temp_dir().join(format!("ree-nested-project-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let write = |path: &str, text: &str| {
+        let path = dir.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    write("modules/@js/react/default.project.json", r#"{ "name": "React", "tree": { "$path": "src" } }"#);
+    write("modules/@js/react/package.json", r#"{ "name": "@js/react" }"#);
+    write("modules/@js/react/src/init.lua", "return { name = script.Name, helper = require(script.Helper) }");
+    write("modules/@js/react/src/Helper.lua", "return 7");
+    write("modules/@ts/react/default.project.json", r#"{ "name": "react", "tree": { "$path": "src" } }"#);
+    write("modules/@ts/react/src/init.lua", "return require(script.Parent.Parent[\"@js\"].React)");
+    write(
+        "modules/@ts/kit/default.project.json",
+        r#"{ "name": "Kit", "tree": { "$className": "Configuration", "Lib": { "$path": "lib" }, "Main": { "$path": "main.luau" }, "Gone": { "$path": { "optional": "missing" } } } }"#,
+    );
+    write("modules/@ts/kit/lib/init.luau", "return \"lib\"");
+    write("modules/@ts/kit/main.luau", "return \"main\"");
+    let (lua, engine) = start();
+    let path = |p: &str| dir.join(p).to_string_lossy().into_owned();
+    mount_at(&engine, &Mount::parse(&format!("ReplicatedStorage/Modules={}", path("modules")), false).unwrap()).unwrap();
+    mount_at(&engine, &Mount::parse(&format!("ReplicatedStorage/Direct={}", path("modules/@js/react")), false).unwrap()).unwrap();
+    let output = run(&lua, &engine, r#"
+        local RS = game:GetService("ReplicatedStorage")
+        local js = RS.Modules["@js"]
+        assert(js.React.ClassName == "ModuleScript", js.React.ClassName)
+        assert(js:FindFirstChild("react") == nil, "no Folder under the directory's name")
+        local react = require(RS.Modules["@ts"].react)
+        assert(react.name == "React" and react.helper == 7, "a package requiring another by its project name")
+        local kit = RS.Modules["@ts"].Kit
+        assert(kit.ClassName == "Configuration", kit.ClassName)
+        assert(require(kit.Lib) == "lib" and require(kit.Main) == "main")
+        assert(kit:FindFirstChild("Gone") == nil, "an optional $path that is missing")
+        assert(RS.Direct.ClassName == "ModuleScript" and require(RS.Direct).name == "Direct", "named by the mount")
+    "#);
+    assert!(output.iter().all(|line| !line.starts_with("error")), "{output:?}");
+    drop(lua);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ReflectionService:GetClasses / GetClass: every class's Name and Superclass (React builds its host
+/// component tags from GetClasses).
+#[test]
+fn reflection_service_lists_the_classes() {
+    let (lua, engine) = start();
+    let output = run(&lua, &engine, r#"
+        local ReflectionService = game:GetService("ReflectionService")
+        local byName = {}
+        for _, class in ReflectionService:GetClasses() do
+            byName[class.Name] = class
+        end
+        assert(byName.Frame and byName.Frame.Superclass == "GuiObject", "Frame")
+        assert(byName.UICorner and byName.TextButton and byName.ScreenGui, "UI classes")
+        assert(byName.Instance and byName.Instance.Superclass == "Object" and byName.Object.Superclass == nil, "the root")
+        assert(ReflectionService:GetClass("TextLabel").Name == "TextLabel")
+        assert(ReflectionService:GetClass("NotAClass") == nil)
+    "#);
+    assert!(output.iter().all(|line| !line.starts_with("error")), "{output:?}");
+}
+
 /// Everything the engine holds per instance, signal and connection, and the Luau heap.
 #[derive(Debug, PartialEq, Clone, Copy)]
 struct Held {
